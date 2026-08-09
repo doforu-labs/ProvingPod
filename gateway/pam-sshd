@@ -1,0 +1,8 @@
+# ProvingPod gateway PAM for sshd
+# hex6 user: pam_exec short-circuits when the password check succeeds; on failure it hands back to pam_unix (virtual users always fail) -> reject
+auth sufficient pam_exec.so quiet expose_authtok /opt/gateway/auth.sh
+auth sufficient pam_unix.so nullok_secure
+auth required pam_deny.so
+account required pam_exec.so quiet /opt/gateway/account.sh
+account required pam_unix.so
+@include common-session

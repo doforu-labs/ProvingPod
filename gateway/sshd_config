@@ -1,0 +1,17 @@
+Port 22
+AddressFamily any
+UsePAM yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitRootLogin no
+PubkeyAuthentication no
+UseDNS no
+GSSAPIAuthentication no
+PrintMotd no
+PidFile /run/sshd.pid
+LogLevel INFO
+Subsystem sftp internal-sftp
+
+Match User ??????
+    ForceCommand /opt/gateway/enter.sh
