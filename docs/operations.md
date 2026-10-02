@@ -50,11 +50,13 @@ USERENV_IMAGE=registry.example/provingpod-pod:v1 \
   sudo ./deploy/deploy.sh --skip-build
 ```
 
-> The explicit `--platform linux/amd64` matters, and `deploy.sh` adds it for you. Docker matches
-> manifests against the host platform, so on an arm64 host a plain `docker pull` of an amd64-only
-> image fails with `no matching manifest for linux/arm64/v8` rather than falling back to the one
-> platform on offer. `docker run` copes without it and only warns. Under compose, set
-> `DOCKER_DEFAULT_PLATFORM=linux/amd64`.
+> Why `--platform linux/amd64` is spelled out: the published tags are single-platform amd64
+> manifests (`provenance: false`), so on an arm64 host a plain `docker pull` actually succeeds —
+> Docker has no platform list to match against, and the mismatch only surfaces as a `docker run`
+> warning. Naming the platform keeps those logs clean, and keeps the command correct if a release
+> is ever published as a manifest index, where a plain pull on arm64 fails with
+> `no matching manifest for linux/arm64/v8 in the manifest list entries` instead of falling back to
+> the one platform on offer. Under compose, set `DOCKER_DEFAULT_PLATFORM=linux/amd64`.
 
 ### Publishing a release
 

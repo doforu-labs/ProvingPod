@@ -55,11 +55,14 @@ else
   : "${USERENV_IMAGE:=proving-pod:v1}"
 fi
 
-# `docker pull` matches manifests against the host platform by default, so pulling an amd64-only
-# image on an arm64 host fails with "no matching manifest for linux/arm64/v8" rather than falling
-# back to the one platform on offer (verified on colima aarch64). Name it explicitly. It also has
-# to reach compose and the gateway's own `docker run` of pod containers — that is what
-# DOCKER_DEFAULT_PLATFORM is for. On x86_64 nothing changes.
+# Name the platform explicitly on a non-x86_64 host. Our published tags are single-platform
+# manifests (publish.yml sets provenance: false), so a plain pull happens to work on arm64 — but
+# naming it keeps the run-time logs clean, and it stops being optional if a release is ever
+# published as a manifest index, where a plain pull on arm64 fails with "no matching manifest for
+# linux/arm64/v8 in the manifest list entries" instead of falling back to the one platform on
+# offer (verified on colima aarch64). It also has to reach compose and the gateway's own
+# `docker run` of pod containers — that is what DOCKER_DEFAULT_PLATFORM is for. On x86_64 nothing
+# changes.
 PLATFORM_ARGS=()
 if [ "$(uname -m)" != x86_64 ]; then
   PLATFORM_ARGS=(--platform linux/amd64)

@@ -60,12 +60,17 @@ else
   : "${USERENV_IMAGE:=proving-pod:v1}"
 fi
 
-# The published images are amd64-only, and `docker pull` matches manifests against the host
-# platform by default. On an arm64 host a plain pull therefore fails outright with
+# The published images are amd64-only. On a non-x86_64 host the platform is named explicitly so
+# the intent is unambiguous and the run-time logs stay clean: without it `docker run` prints
+#   WARNING: The requested image's platform (linux/amd64) does not match the detected host platform
+# The pull itself succeeds either way as things stand, because publish.yml sets `provenance: false`
+# and every tag is therefore a plain single-platform manifest — there is no platform list for
+# Docker to match the host against (verified on colima aarch64, Docker 27.5.1). That stops being
+# true if a release is ever published as a manifest index (attestations re-enabled, or real
+# multi-arch): a plain pull on arm64 then fails outright with
 #   no matching manifest for linux/arm64/v8 in the manifest list entries
-# instead of falling back to the one platform on offer — verified on colima aarch64. So name the
-# platform explicitly. (`docker run` survives without it and only warns, but passing it keeps the
-# logs clean.) On x86_64 nothing is added, so behaviour there is unchanged.
+# and Docker does not fall back to the one platform on offer. On x86_64 nothing is added, so
+# behaviour there is unchanged.
 PLATFORM_ARGS=()
 if [ "$HOST_ARCH" != x86_64 ]; then
   PLATFORM_ARGS=(--platform linux/amd64)

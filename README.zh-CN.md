@@ -196,7 +196,7 @@ sudo ./deploy/deploy.sh --from-registry   # 用 x86_64 runner 构建好的镜像
 
 或者启用 Rosetta（[见上](#如果你在-apple-silicon-上)），或改在 x86_64 上构建、用 `--skip-build` 复用那些镜像。背景见 [docker/setup-qemu-action#188](https://github.com/docker/setup-qemu-action/issues/188)、[docker/desktop-feedback#382](https://github.com/docker/desktop-feedback/issues/382)、[qemu-project/qemu#3130](https://gitlab.com/qemu-project/qemu/-/work_items/3130)。
 
-**`no matching manifest for linux/arm64/v8 in the manifest list entries`** —— 你让一台 arm64 宿主机去拉一个 amd64 专用的镜像。Docker 会按宿主平台匹配 manifest，而对于 manifest list，它**不会**退回到唯一可用的那个平台。`deploy.sh` 已替你加上 `--platform linux/amd64`；若你手工拉取，请照做。用 compose 时请设 `DOCKER_DEFAULT_PLATFORM=linux/amd64`（`demo.sh` 就是这么做的）。
+**`no matching manifest for linux/arm64/v8 in the manifest list entries`** —— 你让一台 arm64 宿主机去拉一个**只提供 amd64 的 manifest list**（镜像索引）。Docker 会按宿主平台匹配 manifest，而对于列表，它**不会**退回到唯一可用的那个平台，于是直接报错。注意 ProvingPod 自己发布的 tag **不是** manifest list：`publish.yml` 设了 `provenance: false`，每个 tag 都是单平台 manifest，因此在任何架构上都能拉下来，平台不匹配只在 `docker run` 时以 WARNING 呈现。这个报错会出现在第三方的多架构镜像上。`deploy.sh` 仍会显式带上 `--platform linux/amd64`，一是让运行日志干净，二是万一将来有版本以索引形式发布也不出错；若你手工拉取，请照做。用 compose 时请设 `DOCKER_DEFAULT_PLATFORM=linux/amd64`（`demo.sh` 就是这么做的）。
 
 **`/opt/gateway/provision.sh: /usr/bin/docker: cannot execute: required file not found`** —— 网关过去会挂载宿主机的 Docker CLI，而这只在宿主机与镜像架构一致时成立。现在 CLI 已内置在网关镜像里；如果你是从旧部署沿用了 volume 或 compose 文件，请去掉 `/usr/bin/docker` 那个挂载。
 

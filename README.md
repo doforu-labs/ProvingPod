@@ -243,10 +243,14 @@ with `--skip-build`. Background:
 [qemu-project/qemu#3130](https://gitlab.com/qemu-project/qemu/-/work_items/3130).
 
 **`no matching manifest for linux/arm64/v8 in the manifest list entries`** — an arm64 host was asked
-to pull an amd64-only image. Docker matches manifests against the host platform and, for a manifest
-list, does not fall back to the one platform on offer. `deploy.sh` passes `--platform linux/amd64`
-for you; if you pull by hand, do the same. Under compose, set
-`DOCKER_DEFAULT_PLATFORM=linux/amd64` (as `demo.sh` does).
+to pull a **manifest list** (image index) that only offers amd64. Docker matches manifests against the
+host platform and, for a list, does not fall back to the one platform on offer, so it errors instead
+of pulling. ProvingPod's own tags are not manifest lists: `publish.yml` sets `provenance: false`, so
+each tag is a plain single-platform manifest, which pulls on any architecture — the mismatch only
+surfaces as a warning when you *run* it. This error does show up with third-party multi-arch images.
+`deploy.sh` passes `--platform linux/amd64` regardless, both to keep the run-time logs clean and to
+stay correct if a release is ever published as an index; if you pull by hand, do the same. Under
+compose, set `DOCKER_DEFAULT_PLATFORM=linux/amd64` (as `demo.sh` does).
 
 **`/opt/gateway/provision.sh: /usr/bin/docker: cannot execute: required file not found`** — the
 gateway used to bind-mount the host's Docker CLI, which only works while host and image share an
