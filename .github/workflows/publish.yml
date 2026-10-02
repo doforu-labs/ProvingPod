@@ -1,0 +1,171 @@
+name: publish images
+
+# Publishes the prebuilt amd64 images to GHCR so that users on Apple Silicon,
+# arm64 Linux or Windows never have to build them locally.
+#
+# Why this workflow exists: the pod image is amd64-only (Chrome ships no arm64
+# Linux build), so building it on an arm64 host means emulating x86_64 with QEMU
+# — and QEMU intermittently segfaults inside emulated apt processes. ubuntu-latest
+# is x86_64, so here the images are built natively with no emulation in the path.
+# The "Require an x86_64 runner" step below fails loudly if that ever changes,
+# because a silent fallback to emulation is exactly the bug these images avoid.
+#
+# Usage:
+#   git tag v0.1.0 && git push origin v0.1.0      -> v0.1.0, 0.1.0, 0.1, latest, sha-<short>
+#   Actions -> publish images -> Run workflow     -> edge, sha-<short>
+#
+# A tag is the only thing that moves :latest; manual runs never overwrite a release.
+# After tagging, bump VERSION in deploy/images.env so `deploy.sh --from-registry`
+# picks up the new release by default.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: build and push (linux/amd64)
+    runs-on: ubuntu-latest
+    outputs:
+      gateway: ${{ steps.names.outputs.gateway }}
+      pod: ${{ steps.names.outputs.pod }}
+      version: ${{ steps.names.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require an x86_64 runner
+        run: |
+          arch="$(uname -m)"
+          echo "runner architecture: $arch"
+          if [ "$arch" != "x86_64" ]; then
+            printf '::error::expected an x86_64 runner, got %s. Refusing to build the amd64 images here: that would mean emulating x86_64, which is the failure mode the prebuilt images exist to avoid.\n' "$arch" >&2
+            exit 1
+          fi
+
+      - name: Resolve image names and version
+        id: names
+        run: |
+          # GHCR rejects uppercase repository names, so normalise the owner.
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          registry="ghcr.io/$owner"
+          if [ '${{ github.ref_type }}' = tag ]; then
+            version='${{ github.ref_name }}'
+          else
+            version='edge'
+          fi
+          {
+            echo "gateway=$registry/provingpod-gateway"
+            echo "pod=$registry/provingpod-pod"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Warn if deploy/images.env is not pinned to this release
+        if: github.ref_type == 'tag'
+        run: |
+          pinned="$(env -u VERSION bash -c '. ./deploy/images.env && printf "%s" "$VERSION"')"
+          if [ "$pinned" != '${{ github.ref_name }}' ]; then
+            echo "::warning::deploy/images.env pins $pinned, but this release is ${{ github.ref_name }}. deploy.sh --from-registry would keep handing out $pinned. Bump VERSION in deploy/images.env."
+          else
+            echo "deploy/images.env is pinned to $pinned — good."
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Two metadata steps rather than one shared list: the build steps below each
+      # need exactly their own image's tags, not the cross product of both.
+      - name: Tags for the gateway image
+        id: meta-gateway
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.gateway }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ github.ref_name }},enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Tags for the pod image
+        id: meta-pod
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.names.outputs.pod }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ github.ref_name }},enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      # provenance: false keeps each tag a plain single-platform manifest instead of
+      # a manifest list with unknown/unknown attestation entries, which some older
+      # clients still choke on when they pull.
+      - name: Build and push the gateway image
+        uses: docker/build-push-action@v6
+        with:
+          context: gateway
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.meta-gateway.outputs.tags }}
+          labels: ${{ steps.meta-gateway.outputs.labels }}
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
+
+      - name: Build and push the pod image
+        uses: docker/build-push-action@v6
+        with:
+          context: userenv
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ${{ steps.meta-pod.outputs.tags }}
+          labels: ${{ steps.meta-pod.outputs.labels }}
+          cache-from: type=gha,scope=pod
+          cache-to: type=gha,mode=max,scope=pod
+
+  smoke:
+    name: smoke-test what was just published
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      # Pull by the release tag from the registry — not from the local build cache.
+      # If the push silently produced something unusable, this is where it shows.
+      - name: Pull both images
+        run: |
+          docker pull '${{ needs.publish.outputs.gateway }}:${{ needs.publish.outputs.version }}'
+          docker pull '${{ needs.publish.outputs.pod }}:${{ needs.publish.outputs.version }}'
+
+      - name: The pod image runs node and Chrome
+        run: |
+          img='${{ needs.publish.outputs.pod }}:${{ needs.publish.outputs.version }}'
+          docker run --rm "$img" node --version
+          # Chrome running as root in a container can refuse to start without --no-sandbox,
+          # so fall back rather than fail the release on a sandbox complaint. Either way this
+          # proves the amd64 .deb installed and the binary actually executes.
+          docker run --rm "$img" google-chrome --version \
+            || docker run --rm "$img" google-chrome --no-sandbox --version
+
+      - name: The gateway image ships a working docker CLI and a valid sshd config
+        run: |
+          img='${{ needs.publish.outputs.gateway }}:${{ needs.publish.outputs.version }}'
+          # Regression test for the bug that motivated baking the CLI in: it used to be
+          # bind-mounted from the host, which dies across architectures with
+          #   /usr/bin/docker: cannot execute: required file not found
+          # --entrypoint is required because the image's own entrypoint starts sshd.
+          docker run --rm --entrypoint /usr/bin/docker "$img" --version
+          docker run --rm --entrypoint sshd "$img" -t

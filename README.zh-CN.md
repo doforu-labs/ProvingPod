@@ -21,7 +21,7 @@ ssh 3f2a9c@<你的服务器> -p 6901 'npm install && npm test'
 不用注册、不用配密钥、不用开云账号、不产生任何账单。
 
 > 用户名可随意取 6 位十六进制（如 `3f2a9c`）；用同一个名字再次登录会回到同一台机器。
-> 还没有服务器？在任何装了 Docker 的机器上跑一条命令即可 —— 见[自己部署](#自己部署)。
+> 还没有服务器？在任何一台 **x86_64 Linux** 机器上跑一条命令即可 —— 见[自己部署](#自己部署)。
 
 [![build](https://github.com/yctech2026/ProvingPod/actions/workflows/build.yml/badge.svg)](https://github.com/yctech2026/ProvingPod/actions/workflows/build.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -141,13 +141,66 @@ ssh 3f2a9c@<host> -p 6901 '
 
 ## 自己部署
 
-ProvingPod 是自托管的。在任何装了 Docker 的机器上：
+ProvingPod 是自托管的，而只有一条约束决定它能跑在哪：pod 镜像是 **`linux/amd64` 专用**的，因为 Chrome 没有 arm64 的 `.deb`。其余一切由此推导：
+
+| 宿主机 | 可用？ | 怎么做 |
+|---|---|---|
+| Linux x86_64 | ✅ | 本地构建两个镜像 —— 项目就是在这条路径上开发测试的 |
+| Linux arm64（Graviton、树莓派等） | ✅ | 拉取预构建的 amd64 镜像；不构建，于是构建阶段没有任何模拟 |
+| macOS（Apple Silicon） | ⚠️ | 预构建镜像去掉了构建环节，但网关还需要 Linux 侧的 daemon socket —— 见下 |
+| Windows | ⚠️ | 未验证 |
 
 ```bash
 sudo ./deploy/deploy.sh
 ```
 
-这会构建两个镜像并启动网关。完整的部署、配置与卸载说明见 **[docs/operations.md](docs/operations.md)**（英文）。
+在 x86_64 上这会构建两个镜像。在其他架构上，同一条命令会改为拉取本项目在 x86_64 runner 上发布好的镜像：
+
+```bash
+sudo ./deploy/deploy.sh --from-registry                            # 强制使用预构建镜像
+PROVINGPOD_VERSION=v0.2.0 sudo ./deploy/deploy.sh --from-registry  # 指定某个版本
+```
+
+之所以要有这条路，是因为在 arm64 上构建 amd64 镜像意味着模拟 x86_64，而 QEMU 做这件事并不可靠 —— 它不会立刻报错，而是在构建到十分钟时才失败。完整的部署、配置与卸载说明见 **[docs/operations.md](docs/operations.md)**（英文）。
+
+### 如果你在 Apple Silicon 上
+
+用拉取代替构建，就绕开了 QEMU 的问题，但还有第二个前提：网关是以「兄弟容器」的方式创建 pod 的，因此需要宿主 Docker daemon 位于 `/var/run/docker.sock`。这个路径能否解析，取决于你的 Docker 虚拟机：
+
+| | 虚拟机内的 `/var/run/docker.sock` | 能否挂载 |
+|---|---|---|
+| colima | 就是该虚拟机自己的 daemon socket | ✅ 已实测 —— 容器通过它驱动了 daemon |
+| Docker Desktop | 是一个目录；宿主路径不在其虚拟机的命名空间里 | ❌ |
+
+所以在 colima 下，`deploy.sh --from-registry` 在 macOS 上应当可用 —— socket 能解析，也能驱动 daemon。但自带的 `demo.sh` 仍然拒绝非 Linux 宿主，对 colima 来说这比实际需要更严。这最后一公里尚未做过端到端验证。
+
+如果你宁愿在本地构建而不是拉取，那就用 Rosetta —— 在真实的 pod 构建中，QEMU 那条路挂了，Rosetta 那条路跑完了（3 分 58 秒，589 MB）：
+
+```bash
+# colima
+colima start --arch aarch64 --vm-type=vz --vz-rosetta
+
+# Docker Desktop：设置 → General → Apple Virtualization，
+# 然后勾选 "Use Rosetta for x86_64/amd64 emulation on Apple Silicon"
+```
+
+`--arch` 必须保持 `aarch64`。若写成 `--arch x86_64`，colima 会**静默忽略** `--vz-rosetta` 并退回全系统 QEMU 模拟 —— 那正是你要避开的那种失败。
+
+## 疑难排查（已知问题）
+
+**`Exception: ('python3.12', '-c', 'import importlib.util; print(importlib.util.MAGIC_NUMBER)') failed with status code -11`** —— 常常在几行之后表现为 `dpkg: error processing package python3-oslo.serialization`，再往后是 `novnc` / `python3-novnc` 报错。这说明你正在用 QEMU 用户态模拟构建 amd64 的 pod 镜像，而 QEMU 在被模拟的进程里触发了段错误。它是**间歇性**的：只在一轮沉重的 `apt` 跑到几分钟时才出现，所以短循环压测未必能复现。这是**上游 QEMU 的 bug，不是 ProvingPod 的 bug** —— 同样的报错串在 `uv`、`rustc`、`.NET` 以及普通 `apt` 构建里都有报告。别再模拟了：
+
+```bash
+sudo ./deploy/deploy.sh --from-registry   # 用 x86_64 runner 构建好的镜像，全程无模拟
+```
+
+或者启用 Rosetta（[见上](#如果你在-apple-silicon-上)），或改在 x86_64 上构建、用 `--skip-build` 复用那些镜像。背景见 [docker/setup-qemu-action#188](https://github.com/docker/setup-qemu-action/issues/188)、[docker/desktop-feedback#382](https://github.com/docker/desktop-feedback/issues/382)、[qemu-project/qemu#3130](https://gitlab.com/qemu-project/qemu/-/work_items/3130)。
+
+**`no matching manifest for linux/arm64/v8 in the manifest list entries`** —— 你让一台 arm64 宿主机去拉一个 amd64 专用的镜像。Docker 会按宿主平台匹配 manifest，而对于 manifest list，它**不会**退回到唯一可用的那个平台。`deploy.sh` 已替你加上 `--platform linux/amd64`；若你手工拉取，请照做。用 compose 时请设 `DOCKER_DEFAULT_PLATFORM=linux/amd64`（`demo.sh` 就是这么做的）。
+
+**`/opt/gateway/provision.sh: /usr/bin/docker: cannot execute: required file not found`** —— 网关过去会挂载宿主机的 Docker CLI，而这只在宿主机与镜像架构一致时成立。现在 CLI 已内置在网关镜像里；如果你是从旧部署沿用了 volume 或 compose 文件，请去掉 `/usr/bin/docker` 那个挂载。
+
+**密码正确却立刻 `Connection closed by remote host`** —— 认证通过了，但 PAM 的 *account* 钩子失败，于是登录被拒。开户就发生在那一步，所以 `sudo -n docker` 出错、pod 镜像不存在、或触发了 `LIMIT_REACHED` 配额，看起来都是这个现象。先看 `docker logs provingpod-gateway`。
 
 ## 项目状态
 

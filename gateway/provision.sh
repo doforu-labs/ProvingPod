@@ -7,6 +7,14 @@
 set -e
 U=$1
 [[ "$U" =~ ^[0-9a-f]{6}$ ]] || { echo "BAD_USER"; exit 1; }
+# Settings come from /data/gateway.env (written by entrypoint.sh): the PAM account hook does not
+# inherit the container environment, so reading $USER_IMAGE / $MAX_USERS directly here would
+# silently ignore whatever compose or deploy.sh configured and always use the defaults below.
+if [ -r /data/gateway.env ]; then
+  # shellcheck source=/dev/null
+  # (generated at container start by entrypoint.sh, so shellcheck cannot read it)
+  . /data/gateway.env
+fi
 USER_IMAGE="${USER_IMAGE:-proving-pod:v1}"
 MAX_USERS="${MAX_USERS:-8}"
 

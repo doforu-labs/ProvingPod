@@ -22,7 +22,7 @@ alone:
 No signup, no keys, no cloud account, no bill.
 
 > Pick any 6-character hex username (like `3f2a9c`); reuse the same name to come back to the same
-> machine. No server running yet? One command on any Docker host sets one up — see
+> machine. No server running yet? One command on an x86_64 Linux host sets one up — see
 > [Run your own](#run-your-own).
 
 [![build](https://github.com/yctech2026/ProvingPod/actions/workflows/build.yml/badge.svg)](https://github.com/yctech2026/ProvingPod/actions/workflows/build.yml)
@@ -166,14 +166,97 @@ pointing anything untrusted at it.
 
 ## Run your own
 
-ProvingPod is self-hosted. On any machine with Docker:
+ProvingPod is self-hosted, and one constraint decides where it can run: the pod image is
+**`linux/amd64` only**, because Chrome ships no arm64 `.deb`. Everything else follows from that.
+
+| Host | Works? | How |
+|---|---|---|
+| Linux x86_64 | ✅ | builds both images locally — the path this project is tested on |
+| Linux arm64 (Graviton, Raspberry Pi, …) | ✅ | pulls the prebuilt amd64 images; nothing is built, so nothing is emulated while building |
+| macOS, Apple Silicon | ⚠️ | prebuilt images remove the build, but the gateway also needs a Linux daemon socket — see below |
+| Windows | ⚠️ | untested |
 
 ```bash
 sudo ./deploy/deploy.sh
 ```
 
-That builds both images and starts the gateway. Full deployment, configuration and teardown
-details live in **[docs/operations.md](docs/operations.md)**.
+On x86_64 that builds both images. On any other architecture the same command pulls images this
+project publishes from an x86_64 runner instead:
+
+```bash
+sudo ./deploy/deploy.sh --from-registry                            # force the prebuilt images
+PROVINGPOD_VERSION=v0.2.0 sudo ./deploy/deploy.sh --from-registry  # pin a release
+```
+
+That route exists because building the amd64 image on an arm64 host means emulating x86_64, and QEMU
+does that unreliably — failing ten minutes into a build rather than immediately. Full deployment,
+configuration and teardown details live in **[docs/operations.md](docs/operations.md)**.
+
+### If you are on Apple Silicon
+
+Pulling instead of building removes the QEMU problem, but there is a second requirement: the gateway
+creates pod containers as siblings of itself, so it needs the host Docker daemon at
+`/var/run/docker.sock`. Whether that path resolves depends on your Docker VM:
+
+| | `/var/run/docker.sock` inside the VM | Mounting it |
+|---|---|---|
+| colima | the VM's own daemon socket | ✅ verified — a container reached the daemon through it |
+| Docker Desktop | a directory; the host path is not in the VM's namespace | ❌ |
+
+So with colima, `deploy.sh --from-registry` is expected to work on macOS — the socket resolves and
+drives the daemon. The bundled `demo.sh` still refuses non-Linux hosts, which is stricter than
+colima needs. That last mile has not been tested end to end.
+
+If you would rather build here than pull, use Rosetta — in the real pod build the QEMU path died and
+the Rosetta path completed (3m58s, 589 MB):
+
+```bash
+# colima
+colima start --arch aarch64 --vm-type=vz --vz-rosetta
+
+# Docker Desktop: Settings -> General -> Apple Virtualization,
+# then enable "Use Rosetta for x86_64/amd64 emulation on Apple Silicon"
+```
+
+`--arch` must stay `aarch64`. With `--arch x86_64`, colima silently ignores `--vz-rosetta` and
+falls back to full QEMU emulation — which is the failure mode you are trying to avoid.
+
+## Troubleshooting (known issues)
+
+**`Exception: ('python3.12', '-c', 'import importlib.util; print(importlib.util.MAGIC_NUMBER)') failed
+with status code -11`** — often surfacing a few lines later as
+`dpkg: error processing package python3-oslo.serialization`, and then as `novnc` /
+`python3-novnc` errors. You are building the amd64 pod image under QEMU user-mode emulation and QEMU
+segfaulted inside the emulated process. It is intermittent: it appears minutes into a heavy `apt`
+run, so a short reproduction loop will not necessarily see it. This is an upstream QEMU bug, not a
+ProvingPod bug — the same signature is reported against `uv`, `rustc`, `.NET` and ordinary `apt`
+builds. Stop emulating:
+
+```bash
+sudo ./deploy/deploy.sh --from-registry   # images built on an x86_64 runner, nothing emulated
+```
+
+or enable Rosetta ([above](#if-you-are-on-apple-silicon)), or build on x86_64 and reuse those images
+with `--skip-build`. Background:
+[docker/setup-qemu-action#188](https://github.com/docker/setup-qemu-action/issues/188),
+[docker/desktop-feedback#382](https://github.com/docker/desktop-feedback/issues/382),
+[qemu-project/qemu#3130](https://gitlab.com/qemu-project/qemu/-/work_items/3130).
+
+**`no matching manifest for linux/arm64/v8 in the manifest list entries`** — an arm64 host was asked
+to pull an amd64-only image. Docker matches manifests against the host platform and, for a manifest
+list, does not fall back to the one platform on offer. `deploy.sh` passes `--platform linux/amd64`
+for you; if you pull by hand, do the same. Under compose, set
+`DOCKER_DEFAULT_PLATFORM=linux/amd64` (as `demo.sh` does).
+
+**`/opt/gateway/provision.sh: /usr/bin/docker: cannot execute: required file not found`** — the
+gateway used to bind-mount the host's Docker CLI, which only works while host and image share an
+architecture. The CLI now ships inside the gateway image; if you are carrying a volume or compose
+file over from an older deployment, drop the `/usr/bin/docker` bind mount.
+
+**`Connection closed by remote host` immediately after a correct password** — authentication
+succeeded but the PAM *account* hook failed, so the login was rejected. Provisioning runs there, so
+a failing `sudo -n docker`, a missing pod image, or a `LIMIT_REACHED` quota all look like this.
+Check `docker logs provingpod-gateway`.
 
 ## Project status
 

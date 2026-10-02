@@ -19,5 +19,13 @@ for k in rsa ed25519 ecdsa; do
   install -m 644 "$key.pub" "/etc/ssh/ssh_host_${k}_key.pub"
 done
 
+# Persist the provisioning settings where the PAM account hook can reach them.
+# pam_exec runs account.sh -> provision.sh in a minimal PAM environment that does NOT inherit the
+# container's environment. Without this file, provision.sh always falls back to its built-in
+# defaults, so USER_IMAGE / MAX_USERS set in compose or deploy.sh are silently ignored.
+printf 'USER_IMAGE=%s\nMAX_USERS=%s\n' \
+  "${USER_IMAGE:-proving-pod:v1}" "${MAX_USERS:-8}" > /data/gateway.env
+echo "==> gateway.env: $(tr '\n' ' ' < /data/gateway.env)"
+
 echo "==> starting sshd"
 exec /usr/sbin/sshd -D

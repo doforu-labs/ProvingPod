@@ -1,6 +1,10 @@
 # ProvingPod SSH dynamic user system - Docker edition orchestration
 # Usage: docker compose -f docker-compose.yml up -d
-# Prereq: proving-gw:v1 and proving-pod:v1 already built
+# Prereq: the two images exist locally. Either build them on x86_64 with deploy.sh,
+# or pre-pull the published ones on any host:
+#   GATEWAY_IMAGE=ghcr.io/yctech2026/provingpod-gateway:v0.1.0 \
+#   USERENV_IMAGE=ghcr.io/yctech2026/provingpod-pod:v0.1.0 \
+#     docker compose -f docker-compose.yml up -d --pull always
 services:
   gateway:
     image: proving-gw:v1
@@ -10,7 +14,11 @@ services:
       - "6901:22"            # SSH entrypoint (host 6901 -> gateway 22)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock   # gateway drives the host docker daemon
-      - /usr/bin/docker:/usr/bin/docker             # reuse the host docker binary (same architecture)
+      # note: the Docker CLI is NOT bind-mounted from the host any more — it ships inside the image.
+      # A mounted host binary only works while host and image share an architecture, which is never
+      # the case on an arm64 host running this amd64 image: sudo -n docker dies with
+      # "cannot execute: required file not found", the PAM account hook fails, and the session is
+      # dropped right after a correct password.
       - provingpod-data:/data                        # lastseen / port records persistence
     environment:
       - USER_IMAGE=proving-pod:v1

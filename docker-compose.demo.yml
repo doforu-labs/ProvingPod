@@ -1,0 +1,83 @@
+# ProvingPod — local demo / evaluation stack
+#
+# Goal: try ProvingPod on one machine. No cloud account, no config files, no API key.
+#
+#   ./demo.sh          build images if needed, start the gateway, run a sample verification
+#   ./demo.sh down     stop everything (gateway + all pods + data)
+#   ./demo.sh shell    open an interactive shell inside a pod
+#
+# ---------------------------------------------------------------------------
+# HARD REQUIREMENTS — read these two lines before you file a bug report
+# ---------------------------------------------------------------------------
+# 1. LINUX host running Docker.
+#    This stack bind-mounts the host's /var/run/docker.sock so the gateway can create
+#    "pod" containers as *siblings* of itself. (The Docker CLI itself ships inside the
+#    gateway image — it used to be mounted from the host, which breaks across architectures.)
+#    Docker resolves bind-mount source paths from the daemon's namespace, and on
+#    macOS/Windows those two paths do not exist there, so the stack cannot work
+#    on a Docker Desktop style host. (Docker Desktop on Windows *inside WSL2*
+#    does work, because the daemon lives in the WSL2 Linux namespace.)
+#
+# 2. x86_64 host — or, on anything else, let demo.sh pull the prebuilt images.
+#    - gateway/Dockerfile compiles the NSS module to /usr/lib/x86_64-linux-gnu/
+#    - userenv/Dockerfile installs Google Chrome's amd64 .deb (Chrome has no
+#      arm64 Linux build), so the full pod image is amd64-only
+#    On an arm64 host demo.sh defaults to IMAGE_SOURCE=registry and pulls the images this
+#    project publishes from an x86_64 runner, so nothing is emulated while *building*.
+#    Running an amd64 image on arm64 still emulates at run time, which is the cheap and
+#    reliable direction. IMAGE_SOURCE=build PLATFORM=linux/amd64 forces a local build
+#    under QEMU instead — correct in principle, but QEMU segfaults intermittently inside
+#    emulated apt processes, minutes into the build. See README "Troubleshooting".
+#
+# ---------------------------------------------------------------------------
+# SECURITY — this is an evaluation stack, not a hardened deployment
+# ---------------------------------------------------------------------------
+# The gateway holds host-root-equivalent power (it drives the Docker socket), and
+# the SSH password is the well-known default (gateway/passwd.conf). Read
+# SECURITY.md. Never expose this port to the internet. Pods are NOT a security
+# boundary — only point ProvingPod at code you already basically trust.
+services:
+  gateway:
+    image: ${GATEWAY_IMAGE:-proving-gw:v1}
+    container_name: provingpod-demo-gateway
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-6901}:22"                  # host SSH port -> gateway sshd
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # the gateway drives the host daemon
+      - provingpod-demo-data:/data                  # ssh host keys + per-pod port records
+      # no /usr/bin/docker mount: the CLI ships inside the gateway image (a mounted host binary
+      # only works when host and image share an architecture)
+    environment:
+      - USER_IMAGE=${USERENV_IMAGE:-proving-pod:v1} # image the gateway clones into pods
+      - MAX_USERS=${MAX_USERS:-4}                   # concurrent pod limit
+    # sshd needs all of these; each one was verified to be load-bearing:
+    #   SYS_CHROOT         privilege separation chroot (login fails without it)
+    #   NET_BIND_SERVICE   bind port 22
+    #   SETUID / SETGID    drop privileges to the virtual hex user
+    #   CHOWN              pod bookkeeping
+    #   DAC_OVERRIDE       reach docker.sock through `sudo -n docker`
+    #   AUDIT_WRITE        sshd writes an audit record per PTY session; without it
+    #                      an interactive (-t) login is killed right after pty-req
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+      - SYS_CHROOT
+      - SETUID
+      - SETGID
+      - CHOWN
+      - DAC_OVERRIDE
+      - AUDIT_WRITE
+    # must stay false: sudo (used by enter.sh) refuses to run under no-new-privileges
+    security_opt:
+      - no-new-privileges:false
+    healthcheck:
+      test: ["CMD", "sshd", "-T"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+
+volumes:
+  provingpod-demo-data:

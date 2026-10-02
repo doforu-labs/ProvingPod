@@ -1,5 +1,14 @@
 # ProvingPod SSH gateway image (Docker dynamic SSH user system gateway)
 # sshd + libnss_hex6 + PAM (auth verifies password / account dynamically creates user containers) + ForceCommand jump via docker exec
+#
+# The Docker CLI is baked in on purpose. It used to be bind-mounted from the host
+# (-v /usr/bin/docker:/usr/bin/docker), which only works while the host and the image share an
+# architecture: on an arm64 host the mounted binary is aarch64 while this container is amd64, so
+# every `sudo -n docker` call dies with
+#   /usr/bin/docker: cannot execute: required file not found
+# That fails the PAM account hook, and sshd drops the session right after a correct password.
+FROM docker:27-cli AS dockercli
+
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -10,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && echo 'ALL ALL=(root) NOPASSWD: /usr/bin/docker' > /etc/sudoers.d/provingpod-docker \
     && chmod 440 /etc/sudoers.d/provingpod-docker \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLI, at the exact path the sudoers rule above expects (`NOPASSWD: /usr/bin/docker`)
+COPY --from=dockercli /usr/local/bin/docker /usr/bin/docker
 
 # ---------- NSS virtual user module (compiled into the image) ----------
 COPY nss_hex6.c /tmp/nss_hex6.c

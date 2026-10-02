@@ -7,19 +7,63 @@ For the internals, see [architecture.md](architecture.md).
 
 - Docker Engine **20.10+** (tested on 29.x). The `docker compose` plugin is **optional** —
   `deploy/deploy.sh` uses plain `docker run` so it works everywhere.
+- An **x86_64** host to build on. Every other architecture pulls the prebuilt images instead —
+  see "Where the images come from" below.
 - Internet access during **build only**: the images pull from `apt`, `deb.nodesource.com` and
-  `dl.google.com` (Chrome). Runtime needs no external network.
+  `dl.google.com` (Chrome). Runtime needs no external network. Deploying from the prebuilt images
+  needs to reach `ghcr.io`, and nothing else.
 - The gateway needs the host Docker daemon (`docker.sock`); the user `dev` must be in the `docker`
   group (or have equivalent socket permissions).
 
 ## Deployment
 
 ```bash
-# One-shot deploy: builds both images and starts the gateway
+# One-shot deploy. On x86_64 it builds both images; anywhere else it pulls the prebuilt ones.
 sudo ./deploy/deploy.sh
-sudo ./deploy/deploy.sh --with-cleanup   # also install the hourly TTL cleanup timer
+sudo ./deploy/deploy.sh --from-registry  # always use the prebuilt images
+sudo ./deploy/deploy.sh --build          # always build here
 sudo ./deploy/deploy.sh --skip-build     # only (re)create the gateway container
+sudo ./deploy/deploy.sh --with-cleanup   # also install the hourly TTL cleanup timer
 ```
+
+### Where the images come from
+
+Both images are amd64-only, so building them on an arm64 host means emulating x86_64 — and QEMU
+segfaults intermittently inside emulated `apt` processes, minutes into the build.
+[`publish.yml`](../.github/workflows/publish.yml) therefore builds them on an x86_64 runner and
+pushes them to GHCR, and `deploy.sh` pulls from there whenever the host is not x86_64.
+
+| `IMAGE_SOURCE` | Behaviour |
+|---|---|
+| `auto` *(default)* | build on x86_64, pull from GHCR otherwise |
+| `build` | always build locally — refused on non-x86_64 unless `FORCE_BUILD=1` |
+| `registry` | always pull `${REGISTRY}/provingpod-{gateway,pod}:${VERSION}` |
+| `skip` | use whatever images are already present |
+
+`REGISTRY` and `VERSION` come from [`deploy/images.env`](../deploy/images.env). Override the release
+without editing it:
+
+```bash
+PROVINGPOD_VERSION=v0.2.0 sudo ./deploy/deploy.sh --from-registry
+GATEWAY_IMAGE=registry.example/provingpod-gateway:v1 \
+USERENV_IMAGE=registry.example/provingpod-pod:v1 \
+  sudo ./deploy/deploy.sh --skip-build
+```
+
+> The explicit `--platform linux/amd64` matters, and `deploy.sh` adds it for you. Docker matches
+> manifests against the host platform, so on an arm64 host a plain `docker pull` of an amd64-only
+> image fails with `no matching manifest for linux/arm64/v8` rather than falling back to the one
+> platform on offer. `docker run` copes without it and only warns. Under compose, set
+> `DOCKER_DEFAULT_PLATFORM=linux/amd64`.
+
+### Publishing a release
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0   # publish.yml builds on x86_64 and pushes to GHCR
+```
+
+Then bump `VERSION` in `deploy/images.env` in the same commit, so `--from-registry` hands out the new
+release by default. `publish.yml` warns when the tag and that file disagree.
 
 <details>
 <summary>Manual <code>docker run</code> equivalent</summary>
@@ -29,7 +73,6 @@ docker build --network host -t proving-pod:v1 userenv/
 docker build --network host -t proving-gw:v1 gateway/
 docker run -d --name provingpod-gateway --restart=unless-stopped -p 6901:22 \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /usr/bin/docker:/usr/bin/docker \
   -v provingpod-data:/data \
   -e USER_IMAGE=proving-pod:v1 \
   -e MAX_USERS=8 \
