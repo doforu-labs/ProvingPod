@@ -1,58 +1,46 @@
-# ProvingPod — Usage Guide (Docker edition)
+# Service usage
 
-> ProvingPod 的临时访问账号体系：随机 6 位小写 hex 用户名（如 `3f2a9c`）+ 固定默认密码 `123456`。
-> SSH 首次连接自动创建隔离的 Docker 容器（proving pod）并直接进入。**交互式会话用 `-tt`，批量执行用命令透传**（`ssh <hex>@host 'cmd'`，Docker 版已支持）；sftp / scp 不可用（ForceCommand 会污染协议流）。
+Day-to-day usage of a running ProvingPod host. For deployment, configuration and teardown see
+[operations.md](operations.md); for the internals see [architecture.md](architecture.md).
 
-## Overview
+## The account model
 
-The service provides zero-friction, disposable proving environments over SSH:
-
-- Any **6-character lowercase hex** username (`[0-9a-f]{6}`, e.g. `3f2a9c`, `b00c1e`) plus the
-  default password `123456` is a valid login.
-- The first SSH connection **auto-provisions** a private, isolated Docker container (`hex_<user>`,
-  image `proving-pod:v1`) and drops you straight into it (first-time provisioning ~1s).
-- Mechanism: **NSS virtual users** (libnss_hex6) make every hex6 name a valid account → PAM
-  (`auth sufficient pam_exec` with `expose_authtok`) verifies the password → the account/pam hook
-  runs `provision.sh` (docker run) on first login → **sshd ForceCommand** runs `enter.sh`, which
-  jumps into the container via `sudo docker exec`.
-- No signup, no key setup: `ssh <hex>@<host> -p 6901` (password `123456`) is all you need.
-
-Concrete deployment used for testing: `192.168.31.82` port `6901` (replace `<host>` with yours).
+Accounts are temporary: any 6-character lowercase-hex username (like `3f2a9c`) plus the default
+password `123456`. The first SSH connection auto-creates an isolated Docker container (a proving
+pod) and drops you straight in. Use `-tt` for an interactive session, or pass a command through for
+batch execution. `sftp` / `scp` are not available — see [below](#why-sftp--scp-do-not-work).
 
 ## How to connect
 
 ```bash
-ssh <random-6-hex>@<host> -p 6901        # password: 123456
+ssh 3f2a9c@<host> -p 6901        # password: 123456
 ```
 
-You can pick any 6-char lowercase hex name; a fresh name gets a fresh container, reusing the same
-name resumes your existing container (if still within TTL).
+Any 6-character lowercase-hex name is valid; a fresh name gets a fresh container, and reusing the
+same name resumes your existing container (within the TTL).
 
 ## Session modes
-
-### Recommended
 
 | Purpose | Command | Notes |
 |---|---|---|
 | Interactive shell | `ssh -tt <hex>@<host> -p 6901` | `-tt` gives you a clean interactive bash in the pod |
-| One-off command | `ssh <hex>@<host> -p 6901 'npm install && npm test'` | Command pass-through (Docker edition; works without `-tt`) |
+| One-off command | `ssh <hex>@<host> -p 6901 'npm install && npm test'` | Command pass-through; works without `-tt` |
 | Scripted session | `printf 'cmd && exit\n' \| ssh -tt <hex>@<host> -p 6901` | Robust against the jump banner |
 
-Example (run `npm install && npm test`, then leave):
-
 ```bash
+# run the test suite and leave
 ssh 3f2a9c@<host> -p 6901 'npm install && npm test'
 ```
 
-## Pod contents
+## What is in a pod
 
-- node 22 LTS + npm + git + build-essential (native npm modules compile fine)
-- XFCE desktop + TigerVNC(5900) + noVNC(6901) + Google Chrome
-- 2 GB RAM / 2 CPU quota, isolated network namespace, random public ports (never conflict)
+- Node 22 LTS + npm + git + build-essential — native npm modules compile fine.
+- XFCE desktop + TigerVNC (`:5900`) + noVNC (`:6901`) + Google Chrome.
+- 2 GB RAM / 2 CPU, its own network namespace, randomly assigned host ports.
 
 ## Desktop (VNC / noVNC)
 
-Each pod publishes random host ports for VNC (5900) and noVNC (6901). Find them on the gateway:
+Each pod publishes random host ports for VNC and noVNC. Read yours from the gateway:
 
 ```bash
 docker exec provingpod-gateway cat /data/ephemeral-users/<hex>.ports
@@ -60,40 +48,21 @@ docker exec provingpod-gateway cat /data/ephemeral-users/<hex>.ports
 # 6901/tcp =0.0.0.0:32769   <- noVNC web (open http://<host>:32769/ in a browser)
 ```
 
-VNC password: `vncpass` by default (shared across pods; per-user via `VNC_PASS` env on userenv).
+The VNC password defaults to `vncpass` (shared across pods; set it per pod with the `VNC_PASS`
+environment variable). The full port scheme is in [operations.md](operations.md#ports).
 
-## sftp / scp limitation — and why
+## Why sftp / scp do not work
 
-**sftp and scp are NOT available.** The sshd `ForceCommand` always runs the jump script; sftp/scp
-are SSH subsystems that expect a clean protocol stream, but the jump emits the container banner /
-provisioning output on the same channel before the protocol handshake completes, corrupting the
-framing → `Connection closed` / `Received message too long` / hang.
+**`sftp` and `scp` are not available.** sshd's `ForceCommand` always runs the jump script, and
+sftp/scp are SSH subsystems that expect a clean protocol stream. The jump emits the container
+banner before the protocol handshake completes, corrupting the framing → `Connection closed` /
+`Received message too long` / a hang.
 
-Workarounds: transfer files **inside** the pod (pipe base64/tar over the SSH channel), or stage
-files via git.
+Workaround: move files **inside** the pod (pipe base64/tar over the SSH channel), or stage them
+through git.
 
-## Operations notes
+## Related
 
-| Item | Value / Rule |
-|---|---|
-| Container quota | `MAX_USERS=8` (env on the gateway) — provisioning fails with `LIMIT_REACHED(8)` once 8 pods exist; existing pods are reused |
-| Cleanup (TTL) | **3 days** — idle pods past TTL are auto-reclaimed by the host systemd timer; a new login re-provisions a fresh one |
-| Per-pod resources | 2 CPU / 2 GiB RAM (set by `provision.sh`) |
-| Network isolation | Each pod gets its own network namespace with random port mappings (ports never conflict) |
-| Credentials | Username: any `[0-9a-f]{6}`; password: `123456` by default (public — treat pods as ephemeral; change `gateway/passwd.conf` before public exposure) |
-| Nature | Temporary proving pods only — never store data you cannot afford to lose |
-
-## Troubleshooting
-
-- **`Connection closed by remote host` on interactive (`-tt`) login** → the gateway container is
-  missing the `AUDIT_WRITE` capability. Recreate it with `--cap-add AUDIT_WRITE`
-  (see `README.md` → Deployment; fixed in `deploy/docker-compose.yml`).
-- **`LIMIT_REACHED(8)`** → all pods are busy; reuse an existing hex name or wait for TTL cleanup.
-- **Login works but noVNC is blank** → check the pod's VNC is up: `docker logs hex_<user>` should
-  show `VNC listening on 5900` / `noVNC listening on 6901`.
-
-## Legacy: incus edition (1st generation, reference only)
-
-The first generation ran incus system containers on host port 22 (`ssh <hex>@host`). It is kept in
-`incus/` for reference; the Docker edition (this guide) replaces it. Differences: entry port 22 →
-6901, incus exec → docker exec, command pass-through not supported → supported.
+- Deployment, configuration, resource limits, TTL and teardown — [operations.md](operations.md)
+- How login and provisioning work — [architecture.md](architecture.md)
+- The 1st-generation incus edition — [migration-notes.md](migration-notes.md)
